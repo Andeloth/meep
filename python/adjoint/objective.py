@@ -535,6 +535,25 @@ class LDOS(ObjectiveQuantity):
         self.ldos_Jdata = self.sim.ldos_Jdata
         return np.array(self._eval)
 
+# 3 possible components for E x n and H x n
+# signs are handled in code
+EH_TRANSVERSE = [
+    [mp.Hz, mp.Hy, mp.Ez, mp.Ey],
+    [mp.Hx, mp.Hz, mp.Ex, mp.Ez],
+    [mp.Hy, mp.Hx, mp.Ey, mp.Ex],
+]
+
+# Holds the components for each current source
+# for the cases of x,y, and z normal vectors.
+# This is the same as swapping H and E in the above list
+JK_TRANSVERSE = [
+    [mp.Ey, mp.Ez, mp.Hy, mp.Hz],
+    [mp.Ez, mp.Ex, mp.Hz, mp.Hx],
+    [mp.Ex, mp.Ey, mp.Hx, mp.Hy],
+]
+
+# Holds the amplitudes used in Poynting Flux adjoint sources
+FLUX_AMPLITUDES = np.array([1 / 4, -1 / 4, -1 / 4, 1 / 4], dtype=np.complex128)
 
 class PoyntingFlux(ObjectiveQuantity):
     """A frequency-dependent Poynting Flux adjoint source.
@@ -552,16 +571,34 @@ class PoyntingFlux(ObjectiveQuantity):
         must lie at the same points. Therefore, the Yee grid will always be false.
     """
 
-    def __init__(self, sim, volume, scale=1, decimation_factor=0):
+    def __init__(self,
+                 sim: mp.Simulation,
+                 volume: mp.Volume,
+                 decimation_factor: Optional[int] = 0,
+                 subtracted_dft_fields: Optional[FluxData] = None):
         super().__init__(sim)
-        # _fit_volume_to_simulation increases the dimensionality of
-        # the volume, so we'll use the user input volume
         self.volume = sim._fit_volume_to_simulation(volume)
-        self.decimation_factor = decimation_factor
-        self.scale = scale
+        
+        # self.decimation_factor = decimation_factor
+        # self.subtracted_dft_fields = subtracted_dft_fields
+        
         # get_normal returns an index for the two
         # dictionaries of cross products
         self.normal = self.get_normal(volume)
+        
+    def get_normal(self, volume:mp.Volume) -> mp.Vector3:
+        if volume.dims == 1:
+        # 1D simulation has a point monitor, so the normal vector must be along the x-axis.
+            pass
+        if volume.dims == 2:
+        # 2D Simulation has a line monitor, so the normal vector must be in the xy-plane.
+            pass
+        elif volume.dims == 3:
+            pass
+        else:
+            raise ValueError(f'Volume dimensions must be 1, 2, or 3. It was: {volume.dims}.')
+        
+        return mp.Vector3()
 
     def register_monitors(self, frequencies):
         self._frequencies = np.asarray(frequencies)
@@ -648,31 +685,3 @@ class PoyntingFlux(ObjectiveQuantity):
         print(np.array([H1, H2, E1, E2, meta]))
         return np.array([H1, H2, E1, E2, meta])
 
-    # takes in a 1x5xNxM vector where the size five array corresponds to
-    # [H1,H2,E1,E1,meta]
-    # multiple frequencies will be tested later
-    @staticmethod
-    def compute_flux(*inputs):
-        # Check if all the inputs are nonzero
-        flux = npa.sum(
-            npa.real(
-                inputs[0][4]
-                * (
-                    npa.conj(inputs[0][0]) * inputs[0][3]
-                    - npa.conj(inputs[0][1]) * inputs[0][2]
-                )
-            )
-        )
-        return flux
-
-    # returns 0,1, or 2 corresponding to x, y, or z normal vectors
-    # TODO: Handle user-specified normal vectors and cases when 2d
-    # has a zero-size dimension other than z
-    def get_normal(self, volume):
-        # I'll add cylindrical later (since the normal vector gets a little different)
-        if volume.size.x == 0:
-            return 0
-        elif volume.size.y == 0:
-            return 1
-        else:
-            return 2
