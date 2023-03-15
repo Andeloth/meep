@@ -535,26 +535,10 @@ class LDOS(ObjectiveQuantity):
         self.ldos_Jdata = self.sim.ldos_Jdata
         return np.array(self._eval)
 
-# 3 possible components for E x n and H x n
-# signs are handled in code
-EH_TRANSVERSE = [
-    [mp.Hz, mp.Hy, mp.Ez, mp.Ey],
-    [mp.Hx, mp.Hz, mp.Ex, mp.Ez],
-    [mp.Hy, mp.Hx, mp.Ey, mp.Ex],
-]
-
-# Holds the components for each current source
-# for the cases of x,y, and z normal vectors.
-# This is the same as swapping H and E in the above list
-JK_TRANSVERSE = [
-    [mp.Ey, mp.Ez, mp.Hy, mp.Hz],
-    [mp.Ez, mp.Ex, mp.Hz, mp.Hx],
-    [mp.Ex, mp.Ey, mp.Hx, mp.Hy],
-]
-
 # Holds the amplitudes used in Poynting Flux adjoint sources
 FLUX_AMPLITUDES = np.array([1 / 4, -1 / 4, -1 / 4, 1 / 4], dtype=np.complex128)
 
+# TODO: Add support for a 3D volume for total Poynting Flux out of a closed surface.
 class PoyntingFlux(ObjectiveQuantity):
     """A frequency-dependent Poynting Flux adjoint source.
     Attributes:
@@ -575,117 +559,98 @@ class PoyntingFlux(ObjectiveQuantity):
                  sim: mp.Simulation,
                  volume: mp.Volume,
                  forward: Optional[bool] = True,
+                 weight: Optional[float] = 1.0,
                  decimation_factor: Optional[int] = 0,
-                 subtracted_dft_fields: Optional[FluxData] = None):
+                 subtracted_flux: Optional[FluxData] = None):
         super().__init__(sim)
         self.volume = sim._fit_volume_to_simulation(volume)
+        weight = weight if forward else -weight
+        self.decimation_factor = decimation_factor
+        self.subtracted_dft_fields = subtracted_flux
+        normal = self.get_normal(volume)
+        self.flux_region = mp.FluxRegion(volume=volume, direction=normal, weight=weight)
         
-        # self.decimation_factor = decimation_factor
-        # self.subtracted_dft_fields = subtracted_dft_fields
+    def get_normal(self, volume:mp.Volume) -> mp.Vector3:
+        zero_indices = []
+        if volume.size.x == 0:
+            zero_indices.append(mp.X)
+        if volume.size.y == 0:
+            zero_indices.append(mp.Y)
+        if volume.size.z == 0:
+            zero_indices.append(mp.Z)
         
-        # get_normal returns an index for the two
-        # dictionaries of cross products
-        self.normal = self.get_normal(volume, forward)
-        
-    def get_normal(self, volume:mp.Volume, forward:bool) -> mp.Vector3:
         if volume.dims == 1:
-        # 1D simulation has a point monitor, so the normal vector must be along the x-axis.
-            return mp.Vector3(x = 1) if forward else mp.Vector3(x = -1)
-        elif volume.dims >= 2:
-        # 2D Simulation has a line monitor, so the normal vector must be in the xy-plane.
-            if volume.size.x == 0:
-                # Flux is along x direction.
-                return mp.Vector3(x = 1) if forward else mp.Vector3(x = -1)
-            elif volume.size.y == 0:
-                # Flux is along y direction.
-                return mp.Vector3(y = 1) if forward else mp.Vector3(y = -1)
-            elif volume.dims == 3 and volume.size.z == 0:
-                # Flux is along z direction.
-                return mp.Vector3(z = 1) if forward else mp.Vector3(z = -1)
+            # In 1D simulations the monitor must be a point monitor.
+            if zero_indices != [mp.X, mp.Y, mp.Z]:
+                raise ValueError("Poynting Flux in 1D only works for a point monitor along the x-axis (all 0 sizes)."
+                                 f"Your monitor has size: {volume.size}.")
             else:
-                return 
+                return mp.X
+        if volume.dims != 2 and volume.is_cylindrical:
+            raise ValueError(f"Volume was somehow made cylindrical in non-2D simulation. Volume dims: {volume.size}, simulation: {self.sim.dimensions}")
+        elif volume.dims == 2 and volume.is_cylindrical:
+            # Cylindrical case
+            # Let meep internals calculate the normal vector.
+            return mp.AUTOMATIC
+        elif volume.dims == 2 and not volume.is_cylindrical:
+            # For Cartesian 2D simulations the 0 dimensions must be one of [x,y] AND z, or ONLY z.
+            # These correspond to line monitors along x or y, and a 2D monitor along z.
+            if zero_indices == [mp.X, mp.Y] or len(zero_indices) in [0,3]:
+                # Covers cases for a line monitor along the z-axis, 3D and point monitors in that order.
+                raise ValueError("Poynting Flux in 2D only works for a line monitor along the x or y axis, or a"
+                                 f"2D monitor along the z-axis. Your monitor has size {volume.size}.")
+            elif len(zero_indices) == 1 and zero_indices != [mp.Z]:
+                # This is a 2D monitor not along the z-axis.
+                raise ValueError("Poynting Flux in 2D can only be a 2D monitor if it's along the z-axis."
+                                 f"Your monitor has size: {volume.size}.")
+            elif zero_indices == [mp.Z]:
+                # This is a 2D monitor along the z-axis.
+                return mp.Z
+            else:
+                # Let meep internals calculate the normal vector.
+                return mp.AUTOMATIC
+        elif volume.dims == 3:
+            # For the 3D case, only 1 dimension can be 0.
+            if len(zero_indices) != 1:
+                # A point, line or 3D monitor is not supported for PoyntingFlux at this time.
+                raise ValueError("Poynting Flux in 3D only works for a plane monitor along the x, y, or z axis."
+                                 f"Your monitor has size: {volume.size}.")
+            else:
+                # Let meep internals calculate the normal vector.
+                return mp.AUTOMATIC
         else:
-            raise ValueError(f'Volume dimensions must be 1, 2, or 3. It was: {volume.dims}.')
-
+            raise ValueError("Volume dimensions must be an integer between 1 and 3."
+                             f"It was {volume.dims}")
+                
     def register_monitors(self, frequencies):
         self._frequencies = np.asarray(frequencies)
-        self._monitor = []
-        # List to hold FourierFields objects
-        self.F_fields_list = []
-        for comp in EH_TRANSVERSE[self.normal]:
-            pass
+        self._monitor = self.sim.add_flux(
+            frequencies,
+            self.flux_region,
+            decimation_factor=self.decimation_factor
+        )
+        if self.subtracted_dft_fields is not None:
+            self.sim.load_minus_flux_data(self._monitor, self.subtracted_dft_fields)
+        
         return self._monitor
 
     def place_adjoint_source(self, dJ):
-        source = []
-        print("This is dJ[0]'s shape:")
-        print(np.array(dJ[0]).shape)
-        squeezed_dJ_0 = np.array(dJ[0]).squeeze()
-        print("This is squeezed dj0 shape:")
-        print(squeezed_dJ_0.shape)
-
-        print("This is metadata's shape:")
-        print(self.field_component_evaluations[4].shape)
-        for pos, field in enumerate(self.F_fields_list):
-            # Make sure there's a nonzero value in the gradient
-            # (zero sources don't converge)
-            # Check is also in prepare_adjoint_run,
-            # but necessary here too since the source is a vector
-            if np.any(dJ[pos]):
-                reshaped_dJ = np.reshape(
-                    np.array(dJ[pos]).squeeze(),
-                    self.field_component_evaluations[4].shape,
-                )
-                # new_source = field.place_adjoint_source(reshaped_dJ)
-                new_source = field.place_adjoint_source(np.array(dJ[pos]).squeeze())
-                print("This is the new source:")
-                print(new_source)
-                print("new soruce's shape")
-                print(np.array(new_source).shape)
-                source.append(
-                    # field.place_adjoint_source(np.flipud(np.array(dJ[pos]).squeeze()))[
-                    #     0
-                    # ]
-                    new_source
-                )
-        final_array = np.array(source).flatten()
-        print("This is the final array shape:")
-        # print(final_array)
-        print(np.array(final_array).shape)
-        # print("This is the final_array with an extra array")
-
-        # test_arr = [final_array]
-        # print(test_arr)
-        # print(test_arr.shape)
-        return final_array.tolist()
+        time_src = self._create_time_profile()
+        sources = []
+        
+        # TODO: Implement flux monitor size retrieval function.
+        mon_size = []
+        if (
+            np.prod(mon_size) * self.num_freq != dJ.size
+            and np.prod(mon_size) * self.num_freq**2 != dJ.size
+        ):
+            raise ValueError("The format of J is incorrect!")
+        
+        # The objective function J is a vector. Each component corresponds to a frequency.
+        if np.prod(mon_size) * self.num_freq**2 == dJ.size and self.num_freq > 1:
+            dJ = np.sum(dJ, axis=1)
 
     def __call__(self):
-        self.field_component_evaluations = []
-        # Get integration weights Meep uses
-        self.metadata = self.sim.get_array_metadata(vol=self.volume)
-        for field in self.F_fields_list:
-            # Get the dft evaluation from a call to the underlying
-            # FourierFields object
-            field_here = field()
-            # make sure it isn't a list of scalar zeros equal to the number of
-            # frequencies (usually caused by symmetries making fields 0)
-            # fixes the np.array error in the return
-            # when we give it a "ragged" array
-            if (np.squeeze(field_here).size) == self._frequencies.size:
-                print("does the empty array check work")
-                print(field_here)
-                field_here = np.array([np.zeros(self.metadata[3].shape)])
-            self.field_component_evaluations.append(field_here)
-
-        self.field_component_evaluations.append(
-            np.array([self.metadata[3]]).astype(complex)
-        )
-        [H1, H2, E1, E2, meta] = self.field_component_evaluations
-
-        self._eval = self.field_component_evaluations
-        print("This is meta*E2")
-        print(meta * E2)
-        print("This is the np array")
-        print(np.array([H1, H2, E1, E2, meta]))
-        return np.array([H1, H2, E1, E2, meta])
+        self._eval = self.sim.get_fluxes(self._monitor)
+        return self._eval
 
