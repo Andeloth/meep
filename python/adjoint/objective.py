@@ -574,6 +574,7 @@ class PoyntingFlux(ObjectiveQuantity):
     def __init__(self,
                  sim: mp.Simulation,
                  volume: mp.Volume,
+                 forward: Optional[bool] = True,
                  decimation_factor: Optional[int] = 0,
                  subtracted_dft_fields: Optional[FluxData] = None):
         super().__init__(sim)
@@ -584,21 +585,27 @@ class PoyntingFlux(ObjectiveQuantity):
         
         # get_normal returns an index for the two
         # dictionaries of cross products
-        self.normal = self.get_normal(volume)
+        self.normal = self.get_normal(volume, forward)
         
-    def get_normal(self, volume:mp.Volume) -> mp.Vector3:
+    def get_normal(self, volume:mp.Volume, forward:bool) -> mp.Vector3:
         if volume.dims == 1:
         # 1D simulation has a point monitor, so the normal vector must be along the x-axis.
-            pass
-        if volume.dims == 2:
+            return mp.Vector3(x = 1) if forward else mp.Vector3(x = -1)
+        elif volume.dims >= 2:
         # 2D Simulation has a line monitor, so the normal vector must be in the xy-plane.
-            pass
-        elif volume.dims == 3:
-            pass
+            if volume.size.x == 0:
+                # Flux is along x direction.
+                return mp.Vector3(x = 1) if forward else mp.Vector3(x = -1)
+            elif volume.size.y == 0:
+                # Flux is along y direction.
+                return mp.Vector3(y = 1) if forward else mp.Vector3(y = -1)
+            elif volume.dims == 3 and volume.size.z == 0:
+                # Flux is along z direction.
+                return mp.Vector3(z = 1) if forward else mp.Vector3(z = -1)
+            else:
+                return 
         else:
             raise ValueError(f'Volume dimensions must be 1, 2, or 3. It was: {volume.dims}.')
-        
-        return mp.Vector3()
 
     def register_monitors(self, frequencies):
         self._frequencies = np.asarray(frequencies)
@@ -606,10 +613,7 @@ class PoyntingFlux(ObjectiveQuantity):
         # List to hold FourierFields objects
         self.F_fields_list = []
         for comp in EH_TRANSVERSE[self.normal]:
-            # instantiate the FourierFields monitors
-            F_field = FourierFields(self.sim, self.volume, comp)
-            self.F_fields_list.append(F_field)
-            self._monitor.append(F_field.register_monitors(self._frequencies))
+            pass
         return self._monitor
 
     def place_adjoint_source(self, dJ):
